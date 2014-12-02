@@ -1,6 +1,9 @@
 #!/usr/bin/env ruby
 #
 # CHANGELOG:
+# * 0.5.0:
+#   - Adds ability to use instance profiles
+#   - Fixes bug in deletion_status where #{node} was undefined
 # * 0.4.0:
 #   - Adds ability to specify a list of states an individual client can have in
 #     EC2. If none is specified, it filters out 'terminated' and 'stopped'
@@ -33,12 +36,20 @@
 #   - sensu-plugin
 #   - fog
 #
-# Requires a Sensu configuration snippet:
+# Requires a Sensu configuration snippet (this automatically uses an instance
+# profile):
+#   {
+#     "aws": {
+#       "region": "us-east-1"
+#     }
+#   }
+#
+# Or, if you don't use instance profiles:
 #   {
 #     "aws": {
 #       "access_key": "adsafdafda",
 #       "secret_key": "qwuieohajladsafhj23nm",
-#       "region": "us-east-1c"
+#       "region": "us-east-1"
 #     }
 #   }
 #
@@ -51,7 +62,7 @@
 # To use, you can set it as the keepalive handler for a client:
 #   {
 #     "client": {
-#       "name": "i-424242",
+#       "name": "i-424242"
 #       "address": "127.0.0.1",
 #       "keepalive": {
 #         "handler": "ec2_node"
@@ -60,6 +71,18 @@
 #     }
 #   }
 #
+# If you prefer non-id client names, add `instance_id` to the client config:
+#   {
+#     "client": {
+#       "name": "foo-i-424242.example.com",
+#       "instance_id": "i-424242",
+#       "address": "127.0.0.1",
+#       "keepalive": {
+#         "handler": "ec2_node"
+#       },
+#       "subscriptions": ["all"]
+#     }
+#   }
 # You can also use this handler with a filter:
 #   {
 #     "filters": {
@@ -109,7 +132,7 @@ class Ec2Node < Sensu::Handler
 
   def delete_sensu_client!
     response = api_request(:DELETE, '/clients/' + @event['client']['name']).code
-    deletion_status(response)
+    deletion_status(response, @event['client']['name'])
   end
 
   def ec2_node_exists?
@@ -117,7 +140,9 @@ class Ec2Node < Sensu::Handler
     filtered_instances = ec2.servers.select { |s| states.include?(s.state) }
     instance_ids = filtered_instances.collect { |s| s.id }
     instance_ids.each do |id|
-      return true if id == @event['client']['name']
+      if id == @event['client']['instance_id'] or id == @event['client']['name']
+        return true
+      end
     end
     false # no match found, node doesn't exist
   end
@@ -127,16 +152,24 @@ class Ec2Node < Sensu::Handler
       key = settings['aws']['access_key'] || ENV['AWS_ACCESS_KEY_ID']
       secret = settings['aws']['secret_key'] || ENV['AWS_SECRET_ACCESS_KEY']
       region = settings['aws']['region'] || ENV['EC2_REGION']
-      Fog::Compute.new({
-        :provider => 'AWS',
-        :aws_access_key_id => key,
-        :aws_secret_access_key => secret,
-        :region => region
-      })
+      if !key.nil? and !secret.nil?
+        Fog::Compute.new({
+          :provider => 'AWS',
+          :aws_access_key_id => key,
+          :aws_secret_access_key => secret,
+          :region => region
+        })
+      else
+        Fog::Compute.new({
+          :provider => 'AWS',
+          :use_instance_profile => true,
+          :region => region
+        })
+      end
     end
   end
 
-  def deletion_status(code)
+  def deletion_status(code, node)
     case code
     when '202'
       puts "[EC2 Node] 202: Successfully deleted Sensu client: #{node}"
@@ -145,7 +178,7 @@ class Ec2Node < Sensu::Handler
     when '500'
       puts "[EC2 Node] 500: Miscellaneous error when deleting #{node}"
     else
-      puts "[EC2 Node] #{res}: Completely unsure of what happened!"
+      puts "[EC2 Node] #{code}: Completely unsure of what happened!"
     end
   end
 
